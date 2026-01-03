@@ -1,0 +1,1497 @@
+# =====================================================================================
+# D&D Encounter Builder — GUARDRAILS (DO NOT REMOVE)
+# =====================================================================================
+# - The app is currently stable. Printing has been fully replaced by Export (PDF + copy/paste).
+# - DO NOT reintroduce browser printing (no window.print / print CSS / HTML print hacks).
+# - Make only small, isolated changes. Patch incrementally. Always keep backups.
+# - Prefer mechanical refactors (comments, names, dedupe constants) that do NOT change behavior.
+# =====================================================================================
+
+from __future__ import annotations
+
+# Phase 3.2 (CODE): centralized creature option constants
+# NOTE: Centralized option lists (used across Monster/NPC UI and filters)
+
+CREATURE_OPTIONS = {
+    "types": [
+        "aberration", "beast", "celestial", "construct", "dragon", "elemental",
+        "fey", "fiend", "giant", "humanoid", "monstrosity", "ooze", "plant", "undead",
+        "custom",
+    ],
+    "sizes": ["Tiny", "Small", "Medium", "Large", "Huge", "Gargantuan"],
+    "alignments": [
+        "Unaligned",
+        "Lawful Good", "Neutral Good", "Chaotic Good",
+        "Lawful Neutral", "Neutral", "Chaotic Neutral",
+        "Lawful Evil", "Neutral Evil", "Chaotic Evil",
+        "Any", "Custom",
+    ],
+    "languages_common": [
+        "Common", "Dwarvish", "Elvish", "Giant", "Gnomish", "Goblin",
+        "Halfling", "Orc",
+    ],
+    "languages_exotic": [
+        "Abyssal", "Celestial", "Draconic", "Deep Speech", "Infernal",
+        "Primordial", "Sylvan", "Undercommon",
+    ],
+    "languages_special": [
+        "Telepathy", "Understands but can't speak", "Speaks but can't understand",
+        "Custom",
+    ],
+}
+
+
+
+
+
+import os
+import re
+
+def _clean_printable(s: str) -> str:
+    # Strip non-printable characters that sometimes show up from encoding issues
+    return re.sub(r'[^\x20-\x7E]', '', s)
+
+from dataclasses import dataclass
+from typing import Optional, Literal
+
+from io import BytesIO
+from datetime import datetime
+
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.units import inch
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+from reportlab.lib import colors
+
+
+import streamlit as st
+import streamlit.components.v1 as components
+import re
+
+def _clean_printable(s: str) -> str:
+    # Strip non-printable characters that sometimes show up from encoding issues
+    return re.sub(r'[^\x20-\x7E]', '', s)
+
+from sqlalchemy import select
+
+from db import init_db, get_session, Monster, NPC, Campaign, Encounter, EncounterEntry
+
+APP_TITLE = "D&D Encounter Builder"
+CreatureKind = Literal["monster", "npc"]
+
+
+def ensure_data_dir():
+    os.makedirs("data", exist_ok=True)
+
+
+def load_css():
+    try:
+        with open(os.path.join("app", "styles.css"), "r", encoding="utf-8") as f:
+            st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+    except FileNotFoundError:
+        pass
+
+
+def toast(msg: str):
+    try:
+        st.toast(msg)
+    except Exception:
+        st.success(msg)
+
+
+def ability_mod(score: int) -> int:
+    return (score - 10) // 2
+
+
+
+def _html_escape(s: str) -> str:
+    if s is None:
+        return ""
+    return (str(s)
+        .replace("&","&amp;")
+        .replace("<","&lt;")
+        .replace(">","&gt;")
+        .replace('"',"&quot;")
+        .replace("'","&#39;")
+    )
+
+def render_print_view_html(title: str, blocks: list[dict]):
+    """
+    Render a dedicated print-only document (recipe-style).
+    blocks: list of { "heading": str, "lines": [str], "notes": bool }
+    """
+    body_parts = [f"<h1>{_html_escape(title)}</h1>"]
+    for b in blocks:
+        if b.get("heading"):
+            body_parts.append(f"<h2>{_html_escape(b['heading'])}</h2>")
+        lines = b.get("lines") or []
+        if lines:
+            body_parts.append("<div class='section'>")
+            for ln in lines:
+                if ln is None: 
+                    continue
+                # allow simple bold markers already in text by escaping everything
+                body_parts.append(f"<p>{_html_escape(ln)}</p>")
+            body_parts.append("</div>")
+        if b.get("notes", False):
+            body_parts.append("<div class='notes'><h3>Notes</h3><div class='note-lines'></div></div>")
+
+    html = f"""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>{_html_escape(title)}</title>
+<style>
+  body {{
+    font-family: Arial, Helvetica, sans-serif;
+    margin: 0.6in;
+    color: #000;
+    background: #fff;
+  }}
+  h1 {{
+    margin: 0 0 0.2in 0;
+    font-size: 22pt;
+  }}
+  h2 {{
+    margin: 0.25in 0 0.1in 0;
+    font-size: 14pt;
+    border-bottom: 1px solid #ddd;
+    padding-bottom: 0.05in;
+  }}
+  p {{
+    margin: 0.05in 0;
+    font-size: 11pt;
+    line-height: 1.25;
+    white-space: pre-wrap;
+  }}
+  .notes {{
+    margin-top: 0.15in;
+    page-break-inside: avoid;
+  }}
+  .notes h3 {{
+    margin: 0.15in 0 0.08in 0;
+    font-size: 12pt;
+  }}
+  .note-lines {{
+    height: 1.1in;
+    border: 1px solid #bbb;
+    border-radius: 8px;
+  }}
+  .controls {{
+    position: fixed;
+    top: 0;
+    right: 0;
+    padding: 0.25in;
+  }}
+  button {{
+    padding: 10px 14px;
+    font-size: 12pt;
+    border-radius: 10px;
+    border: 1px solid #888;
+    cursor: pointer;
+    background: #fff;
+  }}
+  @media print {{
+    .controls {{ display: none; }}
+  }}
+</style>
+</head>
+<body>
+  <div class="controls"><button onclick="window.print()">Print</button></div>
+  {''.join(body_parts)}
+</body>
+</html>
+"""
+    components.html(html, height=900, scrolling=True)
+
+
+def fmt_mod(score: int) -> str:
+    return f"{ability_mod(score):+d}"
+
+
+def clean_save_bonus(s: str) -> str:
+    s = (s or "").strip()
+    if not s:
+        return ""
+    if s.lstrip("+-").isdigit():
+        n = int(s)
+        return f"{n:+d}"
+    return s
+
+
+def key_safe(s: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in (s or "")).strip("_") or "blank"
+
+
+
+@dataclass
+class CreatureFormData:
+    name: str
+    creature_type: str
+    size: str
+    alignment: str
+    ac: str
+    has_shield: bool
+    hp: str
+    speed: str
+
+    str_score: int
+    dex_score: int
+    con_score: int
+    int_score: int
+    wis_score: int
+    cha_score: int
+
+    save_str: str
+    save_dex: str
+    save_con: str
+    save_int: str
+    save_wis: str
+    save_cha: str
+
+    skills: str
+    damage_vulnerabilities: str
+    damage_resistances: str
+    damage_immunities: str
+    condition_immunities: str
+    senses: str
+    languages: str
+    cr: str
+    pb: str
+
+    traits: str
+    actions: str
+    bonus_actions: str
+    reactions: str
+    legendary_actions: str
+    lair_actions: str
+    equipment: str
+    notes: str
+
+
+def creature_form(kind: CreatureKind, defaults=None, key_prefix: str = "form") -> CreatureFormData:
+    d = defaults
+    st.subheader(f"{'Monster' if kind=='monster' else 'NPC'} Stat Block")
+
+    r1a, r1b, r1c, r1d = st.columns([2, 1.2, 0.8, 1.0])
+    name = r1a.text_input("Name*", value=(d.name if d else ""), key=f"{key_prefix}_name")
+
+    # --- Phase 1.2 (Safe): Dropdowns for common fields (stored as strings) ---
+    type_opts = [
+        "", "Aberration", "Beast", "Celestial", "Construct", "Dragon", "Elemental", "Fey",
+        "Fiend", "Giant", "Humanoid", "Monstrosity", "Ooze", "Plant", "Undead", "Custom…"
+    ]
+    size_opts = ["", "Tiny", "Small", "Medium", "Large", "Huge", "Gargantuan", "Custom…"]
+    align_opts = [
+        "", "Lawful Good", "Neutral Good", "Chaotic Good",
+        "Lawful Neutral", "Neutral", "Chaotic Neutral",
+        "Lawful Evil", "Neutral Evil", "Chaotic Evil",
+        "Unaligned", "Custom…"
+    ]
+
+    cur_type = (d.creature_type if d else "") or ""
+    cur_size = (d.size if d else "") or ""
+    cur_align = (d.alignment if d else "") or ""
+
+    type_pick_default = cur_type if cur_type in type_opts else ("Custom…" if cur_type else "")
+    size_pick_default = cur_size if cur_size in size_opts else ("Custom…" if cur_size else "")
+    align_pick_default = cur_align if cur_align in align_opts else ("Custom…" if cur_align else "")
+
+    type_pick = r1b.selectbox("Type", options=type_opts, index=type_opts.index(type_pick_default), key=f"{key_prefix}_type_pick")
+    size_pick = r1c.selectbox("Size", options=size_opts, index=size_opts.index(size_pick_default), key=f"{key_prefix}_size_pick")
+    align_pick = r1d.selectbox("Alignment", options=align_opts, index=align_opts.index(align_pick_default), key=f"{key_prefix}_align_pick")
+
+    type_custom = r1b.text_input("Type (custom)", value=(cur_type if type_pick == "Custom…" else ""), key=f"{key_prefix}_type_custom")
+    size_custom = r1c.text_input("Size (custom)", value=(cur_size if size_pick == "Custom…" else ""), key=f"{key_prefix}_size_custom")
+    align_custom = r1d.text_input("Alignment (custom)", value=(cur_align if align_pick == "Custom…" else ""), key=f"{key_prefix}_align_custom")
+
+    creature_type = type_custom.strip() if type_pick == "Custom…" else type_pick.strip()
+    size = size_custom.strip() if size_pick == "Custom…" else size_pick.strip()
+    alignment = align_custom.strip() if align_pick == "Custom…" else align_pick.strip()
+
+    r2a, r2b, r2c, r2d = st.columns([1.1, 0.9, 1.1, 0.9])
+    ac = r2a.text_input("AC", value=(d.ac if d else ""), key=f"{key_prefix}_ac")
+    has_shield = r2b.checkbox("Shield", value=(bool(getattr(d, "has_shield", 0)) if d else False), key=f"{key_prefix}_shield")
+    hp = r2c.text_input("HP", value=(d.hp if d else ""), key=f"{key_prefix}_hp")
+    speed = r2d.text_input("Speed", value=(d.speed if d else ""), key=f"{key_prefix}_speed")
+
+    
+    st.subheader("Ability Scores")
+    a1, a2, a3, a4, a5, a6 = st.columns(6)
+
+    str_score = a1.number_input("STR", min_value=1, max_value=30, value=(d.str_score if d else 10), step=1, key=f"{key_prefix}_str")
+    dex_score = a2.number_input("DEX", min_value=1, max_value=30, value=(d.dex_score if d else 10), step=1, key=f"{key_prefix}_dex")
+    con_score = a3.number_input("CON", min_value=1, max_value=30, value=(d.con_score if d else 10), step=1, key=f"{key_prefix}_con")
+    int_score = a4.number_input("INT", min_value=1, max_value=30, value=(d.int_score if d else 10), step=1, key=f"{key_prefix}_int")
+    wis_score = a5.number_input("WIS", min_value=1, max_value=30, value=(d.wis_score if d else 10), step=1, key=f"{key_prefix}_wis")
+    cha_score = a6.number_input("CHA", min_value=1, max_value=30, value=(d.cha_score if d else 10), step=1, key=f"{key_prefix}_cha")
+
+    st.caption(
+        f"Mods: STR {fmt_mod(int(str_score))} | DEX {fmt_mod(int(dex_score))} | CON {fmt_mod(int(con_score))} | "
+        f"INT {fmt_mod(int(int_score))} | WIS {fmt_mod(int(wis_score))} | CHA {fmt_mod(int(cha_score))}"
+    )
+
+    st.subheader("Saving Throws (bonuses)")
+    s1, s2, s3, s4, s5, s6 = st.columns(6)
+    save_str = s1.text_input("STR Save", value=(getattr(d, "save_str", "") if d else ""), key=f"{key_prefix}_save_str")
+    save_dex = s2.text_input("DEX Save", value=(getattr(d, "save_dex", "") if d else ""), key=f"{key_prefix}_save_dex")
+    save_con = s3.text_input("CON Save", value=(getattr(d, "save_con", "") if d else ""), key=f"{key_prefix}_save_con")
+    save_int = s4.text_input("INT Save", value=(getattr(d, "save_int", "") if d else ""), key=f"{key_prefix}_save_int")
+    save_wis = s5.text_input("WIS Save", value=(getattr(d, "save_wis", "") if d else ""), key=f"{key_prefix}_save_wis")
+    save_cha = s6.text_input("CHA Save", value=(getattr(d, "save_cha", "") if d else ""), key=f"{key_prefix}_save_cha")
+
+    st.subheader("Defenses & Skills")
+    x1, x2 = st.columns(2)
+    skills = x1.text_area("Skills", value=(d.skills if d else ""), height=70, key=f"{key_prefix}_skills")
+    condition_immunities = x2.text_area("Condition Immunities", value=(d.condition_immunities if d else ""), height=70, key=f"{key_prefix}_cond_imm")
+
+    v1, v2, v3 = st.columns(3)
+    damage_vulnerabilities = v1.text_area("Damage Vulnerabilities", value=(d.damage_vulnerabilities if d else ""), height=70, key=f"{key_prefix}_vuln")
+    damage_resistances = v2.text_area("Damage Resistances", value=(d.damage_resistances if d else ""), height=70, key=f"{key_prefix}_res")
+    damage_immunities = v3.text_area("Damage Immunities", value=(d.damage_immunities if d else ""), height=70, key=f"{key_prefix}_imm")
+
+    st.subheader("Senses, Languages, Challenge")
+    t1, t2, t3, t4 = st.columns([2, 2, 1, 1])
+    senses = t1.text_area("Senses", value=(d.senses if d else ""), height=70, key=f"{key_prefix}_senses")
+
+    # Languages: multiselect common + "Custom…" option, stored as a single string
+    lang_opts = [
+        "Common", "Dwarvish", "Elvish", "Gnomish", "Goblin", "Halfling", "Orc",
+        "Draconic", "Giant", "Infernal", "Abyssal", "Celestial", "Sylvan", "Undercommon", "Primordial",
+        "Custom…"
+    ]
+    cur_lang = (d.languages if d else "") or ""
+
+    # parse existing "A, B, C" into selections where possible
+    parts = [p.strip() for p in cur_lang.split(",") if p.strip()]
+    known = [p for p in parts if p in lang_opts and p != "Custom…"]
+    other = ", ".join([p for p in parts if p not in lang_opts])
+
+    # If there are unknown languages, auto-select Custom… and prefill the custom box.
+    default_sel = list(known)
+    if other.strip():
+        default_sel.append("Custom…")
+
+    picked_langs = t2.multiselect(
+        "Languages",
+        options=lang_opts,
+        default=default_sel,
+        key=f"{key_prefix}_languages_pick"
+    )
+
+    other_langs = ""
+    if "Custom…" in picked_langs:
+        other_langs = t2.text_input(
+            "Custom languages (comma-separated)",
+            value=other,
+            key=f"{key_prefix}_languages_other"
+        )
+
+    # merge into a single string (exclude the literal "Custom…" token)
+    merged = [p for p in picked_langs if p and p != "Custom…"]
+    if other_langs.strip():
+        merged.append(other_langs.strip())
+    languages = ", ".join([m for m in merged if m]).strip()
+
+    # CR: dropdown common values + optional custom, stored as string
+    cr_opts = ["", "0", "1/8", "1/4", "1/2"] + [str(i) for i in range(1, 31)] + ["Custom…"]
+    cur_cr = (d.cr if d else "") or ""
+    cr_pick_default = cur_cr if cur_cr in cr_opts else ("Custom…" if cur_cr else "")
+    cr_pick = t3.selectbox("CR", options=cr_opts, index=cr_opts.index(cr_pick_default), key=f"{key_prefix}_cr_pick")
+    cr_custom = t3.text_input("CR (custom)", value=(cur_cr if cr_pick == "Custom…" else ""), key=f"{key_prefix}_cr_custom")
+    cr = cr_custom.strip() if cr_pick == "Custom…" else cr_pick.strip()
+
+  
+    with t4:
+        # PB: use 0 as "blank"
+        pb_default = 0
+        try:
+            raw = (d.pb if d else "")
+            raw = str(raw).strip()
+            pb_default = int(raw.replace("+", "")) if raw else 0
+        except Exception:
+            pb_default = 0
+
+        pb_int = st.number_input(
+            "PB (0 = blank)",
+            min_value=0,
+            max_value=20,
+            value=int(pb_default),
+            step=1,
+            key=f"{key_prefix}_pb_int"
+        )
+
+        pb = "" if int(pb_int) == 0 else f"{int(pb_int):+d}"
+
+
+
+
+    st.subheader("Traits & Actions")
+    traits = st.text_area("Traits", value=(d.traits if d else ""), height=140, key=f"{key_prefix}_traits")
+    actions = st.text_area("Actions", value=(d.actions if d else ""), height=140, key=f"{key_prefix}_actions")
+
+    b1, b2 = st.columns(2)
+    bonus_actions = b1.text_area("Bonus Actions", value=(d.bonus_actions if d else ""), height=120, key=f"{key_prefix}_bonus")
+    reactions = b2.text_area("Reactions", value=(d.reactions if d else ""), height=120, key=f"{key_prefix}_react")
+
+    l1, l2 = st.columns(2)
+    legendary_actions = l1.text_area("Legendary Actions", value=(d.legendary_actions if d else ""), height=120, key=f"{key_prefix}_leg")
+    lair_actions = l2.text_area("Lair Actions", value=(d.lair_actions if d else ""), height=120, key=f"{key_prefix}_lair")
+
+    equipment = st.text_area("Equipment / Gear", value=(d.equipment if d else ""), height=90, key=f"{key_prefix}_equip")
+    notes = st.text_area("Library Notes", value=(d.notes if d else ""), height=90, key=f"{key_prefix}_notes")
+
+    return CreatureFormData(
+        name=name.strip(),
+        creature_type=creature_type.strip(),
+        size=size.strip(),
+        alignment=alignment.strip(),
+        ac=ac.strip(),
+        has_shield=bool(has_shield),
+        hp=hp.strip(),
+        speed=speed.strip(),
+        str_score=int(str_score),
+        dex_score=int(dex_score),
+        con_score=int(con_score),
+        int_score=int(int_score),
+        wis_score=int(wis_score),
+        cha_score=int(cha_score),
+        save_str=clean_save_bonus(save_str),
+        save_dex=clean_save_bonus(save_dex),
+        save_con=clean_save_bonus(save_con),
+        save_int=clean_save_bonus(save_int),
+        save_wis=clean_save_bonus(save_wis),
+        save_cha=clean_save_bonus(save_cha),
+        skills=skills.strip(),
+        damage_vulnerabilities=damage_vulnerabilities.strip(),
+        damage_resistances=damage_resistances.strip(),
+        damage_immunities=damage_immunities.strip(),
+        condition_immunities=condition_immunities.strip(),
+        senses=senses.strip(),
+        languages=languages.strip(),
+        cr=cr.strip(),
+        pb=pb.strip(),
+        traits=traits.strip(),
+        actions=actions.strip(),
+        bonus_actions=bonus_actions.strip(),
+        reactions=reactions.strip(),
+        legendary_actions=legendary_actions.strip(),
+        lair_actions=lair_actions.strip(),
+        equipment=equipment.strip(),
+        notes=notes.strip(),
+    )
+
+
+def upsert_creature(kind: CreatureKind, data: CreatureFormData, overwrite: bool) -> None:
+    Model = Monster if kind == "monster" else NPC
+    with get_session() as s:
+        existing = s.scalar(select(Model).where(Model.name == data.name))
+        if existing and not overwrite:
+            raise ValueError("EXISTS")
+
+        obj = existing if existing and overwrite else Model(name=data.name)
+        if not existing:
+            s.add(obj)
+
+        obj.creature_type = data.creature_type
+        obj.size = data.size
+        obj.alignment = data.alignment
+        obj.ac = data.ac
+        obj.has_shield = 1 if data.has_shield else 0
+        obj.hp = data.hp
+        obj.speed = data.speed
+
+        obj.str_score = data.str_score
+        obj.dex_score = data.dex_score
+        obj.con_score = data.con_score
+        obj.int_score = data.int_score
+        obj.wis_score = data.wis_score
+        obj.cha_score = data.cha_score
+
+        # IMPORTANT: satisfy legacy NOT NULL monsters.saves
+        if hasattr(obj, "saves"):
+            obj.saves = ""
+
+        obj.save_str = data.save_str
+        obj.save_dex = data.save_dex
+        obj.save_con = data.save_con
+        obj.save_int = data.save_int
+        obj.save_wis = data.save_wis
+        obj.save_cha = data.save_cha
+
+        obj.skills = data.skills
+        obj.damage_vulnerabilities = data.damage_vulnerabilities
+        obj.damage_resistances = data.damage_resistances
+        obj.damage_immunities = data.damage_immunities
+        obj.condition_immunities = data.condition_immunities
+        obj.senses = data.senses
+        obj.languages = data.languages
+        obj.cr = data.cr
+        obj.pb = data.pb
+
+        obj.traits = data.traits
+        obj.actions = data.actions
+        obj.bonus_actions = data.bonus_actions
+        obj.reactions = data.reactions
+        obj.legendary_actions = data.legendary_actions
+        obj.lair_actions = data.lair_actions
+        obj.equipment = data.equipment
+        obj.notes = data.notes
+        obj.touch()
+
+        s.commit()
+
+
+def get_names(kind: CreatureKind) -> list[str]:
+    Model = Monster if kind == "monster" else NPC
+    with get_session() as s:
+        return list(s.scalars(select(Model.name).order_by(Model.name)).all())
+
+def get_creatures(kind: CreatureKind):
+    """Return all creature rows for library filtering (name/type/size/alignment/ac/cr)."""
+    Model = Monster if kind == "monster" else NPC
+    with get_session() as s:
+        return list(s.scalars(select(Model).order_by(Model.name)).all())
+
+
+
+def get_by_name(kind: CreatureKind, name: str):
+    Model = Monster if kind == "monster" else NPC
+    with get_session() as s:
+        return s.scalar(select(Model).where(Model.name == name))
+
+
+def delete_by_name(kind: CreatureKind, name: str) -> None:
+    Model = Monster if kind == "monster" else NPC
+    with get_session() as s:
+        obj = s.scalar(select(Model).where(Model.name == name))
+        if obj:
+            s.delete(obj)
+            s.commit()
+
+
+def get_campaign_names() -> list[str]:
+    with get_session() as s:
+        return list(s.scalars(select(Campaign.name).order_by(Campaign.name)).all())
+
+
+def ensure_session_state():
+    if "builder_entries" not in st.session_state:
+        st.session_state.builder_entries = []
+    if "last_added" not in st.session_state:
+        st.session_state.last_added = ""
+
+
+def add_entry_from_creature(kind: CreatureKind, obj, qty: int):
+    st.session_state.builder_entries.append(
+        dict(
+            kind=kind,
+            name=obj.name,
+            quantity=qty,
+            ac=obj.ac,
+            has_shield=int(getattr(obj, "has_shield", 0)),
+            hp=obj.hp,
+            speed=obj.speed,
+            senses=obj.senses,
+            str_score=obj.str_score,
+            dex_score=obj.dex_score,
+            con_score=obj.con_score,
+            int_score=obj.int_score,
+            wis_score=obj.wis_score,
+            cha_score=obj.cha_score,
+            save_str=getattr(obj, "save_str", ""),
+            save_dex=getattr(obj, "save_dex", ""),
+            save_con=getattr(obj, "save_con", ""),
+            save_int=getattr(obj, "save_int", ""),
+            save_wis=getattr(obj, "save_wis", ""),
+            save_cha=getattr(obj, "save_cha", ""),
+            traits=obj.traits,
+            actions=obj.actions,
+            bonus_actions=obj.bonus_actions,
+            reactions=obj.reactions,
+            legendary_actions=obj.legendary_actions,
+            notes="",
+        )
+    )
+    st.session_state.last_added = f"Added: {obj.name} x{qty}"
+
+
+def save_encounter(name: str, description: str, campaign_name: Optional[str]):
+    with get_session() as s:
+        campaign_id = None
+        if campaign_name and campaign_name != "(None)":
+            c = s.scalar(select(Campaign).where(Campaign.name == campaign_name))
+            if c:
+                campaign_id = c.id
+
+        enc = Encounter(name=name, description=description, campaign_id=campaign_id)
+        s.add(enc)
+        s.flush()
+
+        for e in st.session_state.builder_entries:
+            entry = EncounterEntry(
+                encounter_id=enc.id,
+                kind=e["kind"],
+                name=e["name"],
+                quantity=e["quantity"],
+                ac=e.get("ac", ""),
+                has_shield=int(e.get("has_shield", 0)),
+                hp=e.get("hp", ""),
+                speed=e.get("speed", ""),
+                senses=e.get("senses", ""),
+                str_score=int(e.get("str_score", 10)),
+                dex_score=int(e.get("dex_score", 10)),
+                con_score=int(e.get("con_score", 10)),
+                int_score=int(e.get("int_score", 10)),
+                wis_score=int(e.get("wis_score", 10)),
+                cha_score=int(e.get("cha_score", 10)),
+                save_str=e.get("save_str", ""),
+                save_dex=e.get("save_dex", ""),
+                save_con=e.get("save_con", ""),
+                save_int=e.get("save_int", ""),
+                save_wis=e.get("save_wis", ""),
+                save_cha=e.get("save_cha", ""),
+                traits=e.get("traits", ""),
+                actions=e.get("actions", ""),
+                bonus_actions=e.get("bonus_actions", ""),
+                reactions=e.get("reactions", ""),
+                legendary_actions=e.get("legendary_actions", ""),
+                notes=e.get("notes", ""),
+            )
+            s.add(entry)
+
+        enc.touch()
+        s.commit()
+
+
+def delete_encounter(encounter_id: int) -> None:
+    with get_session() as s:
+        enc = s.get(Encounter, encounter_id)
+        if enc:
+            s.delete(enc)
+            s.commit()
+
+
+def request_print(payload: dict):
+    st.session_state["__print_payload"] = payload
+    st.session_state["__print_mode"] = True
+
+def render_print_controls(label: str = "Print"):
+    # Simple, visible print button
+    if st.button(label, key=f"__print_btn_{label}"):
+        components.html("<script>window.parent.print();</script>", height=0)
+
+def render_print_sheet(encounter_title: str):
+    st.markdown(f'<div id="print-area"><h1>{encounter_title}</h1>', unsafe_allow_html=True)
+    st.markdown(f"## {encounter_title}")
+
+    for idx, e in enumerate(st.session_state.builder_entries, start=1):
+        shield = " [Shield]" if int(e.get("has_shield", 0)) == 1 else ""
+        header = f"{idx}. {e['name']} x{e['quantity']} ({e['kind']}){shield}"
+        header = _clean_printable(header)
+        st.markdown(f"### {header}")
+
+        top = []
+        if e.get("ac"): top.append(f"**AC:** {e['ac']}{' (Shield)' if int(e.get('has_shield',0))==1 else ''}")
+        if e.get("hp"): top.append(f"**HP:** {e['hp']}")
+        if e.get("speed"): top.append(f"**Speed:** {e['speed']}")
+        if e.get("senses"): top.append(f"**Senses:** {e['senses']}")
+        if top:
+            st.markdown(" | ".join(top))
+
+        scores = {
+            "STR": int(e.get("str_score", 10)),
+            "DEX": int(e.get("dex_score", 10)),
+            "CON": int(e.get("con_score", 10)),
+            "INT": int(e.get("int_score", 10)),
+            "WIS": int(e.get("wis_score", 10)),
+            "CHA": int(e.get("cha_score", 10)),
+        }
+        score_line = " | ".join([f"**{k}** {v} ({fmt_mod(v)})" for k, v in scores.items()])
+        st.markdown(f"**Ability Scores:** {score_line}")
+
+        saves = {
+            "STR": e.get("save_str", ""),
+            "DEX": e.get("save_dex", ""),
+            "CON": e.get("save_con", ""),
+            "INT": e.get("save_int", ""),
+            "WIS": e.get("save_wis", ""),
+            "CHA": e.get("save_cha", ""),
+        }
+        save_bits = [f"{k} {v}" for k, v in saves.items() if (v or "").strip()]
+        st.markdown("**Saving Throws:** " + (" | ".join(save_bits) if save_bits else "â€”"))
+
+        if e.get("traits"):
+            st.markdown("**Traits**")
+            st.markdown(e["traits"])
+        if e.get("actions"):
+            st.markdown("**Actions**")
+            st.markdown(e["actions"])
+        if e.get("bonus_actions"):
+            st.markdown("**Bonus Actions**")
+            st.markdown(e["bonus_actions"])
+        if e.get("reactions"):
+            st.markdown("**Reactions**")
+            st.markdown(e["reactions"])
+        if e.get("legendary_actions"):
+            st.markdown("**Legendary Actions**")
+            st.markdown(e["legendary_actions"])
+
+        st.markdown("---")
+        st.markdown("**Notes:**\n\n\n\n")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+# =====================================================================================
+# PAGES
+# =====================================================================================
+# __SECTION_PAGES__
+
+# =====================================================================================
+# CREATURE LIBRARY
+# =====================================================================================
+# __SECTION_CREATURE_LIBRARY__
+def page_creature_library(kind: CreatureKind):
+    label = "Monsters Library" if kind == "monster" else "NPCs Library"
+    st.header(label)
+
+    names = get_names(kind)
+    select_key = f"{kind}_select"
+
+    # --- Phase 1.3 (Safe): Library Filters (powered by dropdown fields) ---
+    all_objs = get_creatures(kind)
+    all_names = [o.name for o in all_objs]
+
+    def _uniq(attr: str) -> list[str]:
+        vals = sorted({
+            (getattr(o, attr, "") or "").strip()
+            for o in all_objs
+            if (getattr(o, attr, "") or "").strip()
+        })
+        return ["(Any)"] + vals
+
+    fA, fB, fC, fD, fE = st.columns([1.3, 1.0, 1.3, 1.0, 0.9])
+    with fA:
+        type_filter = st.selectbox("Type filter", options=_uniq("creature_type"), key=f"{kind}_filter_type")
+    with fB:
+        size_filter = st.selectbox("Size filter", options=_uniq("size"), key=f"{kind}_filter_size")
+    with fC:
+        align_filter = st.selectbox("Alignment filter", options=_uniq("alignment"), key=f"{kind}_filter_alignment")
+    with fD:
+        ac_filter = st.selectbox("AC filter", options=_uniq("ac"), key=f"{kind}_filter_ac")
+    with fE:
+        cr_filter = st.selectbox("CR filter", options=_uniq("cr"), key=f"{kind}_filter_cr")
+
+    sort_dir = st.radio("Sort", ["A → Z", "Z → A"], horizontal=True, key=f"{kind}_sort")
+
+    filtered_objs = list(all_objs)
+    if type_filter != "(Any)":
+        filtered_objs = [o for o in filtered_objs if (o.creature_type or "").strip() == type_filter]
+    if size_filter != "(Any)":
+        filtered_objs = [o for o in filtered_objs if (o.size or "").strip() == size_filter]
+    if align_filter != "(Any)":
+        filtered_objs = [o for o in filtered_objs if (o.alignment or "").strip() == align_filter]
+    if ac_filter != "(Any)":
+        filtered_objs = [o for o in filtered_objs if (o.ac or "").strip() == ac_filter]
+    if cr_filter != "(Any)":
+        filtered_objs = [o for o in filtered_objs if (o.cr or "").strip() == cr_filter]
+
+    filtered = sorted([o.name for o in filtered_objs])
+    if sort_dir == "Z → A":
+        filtered = list(reversed(filtered))
+
+    force_new_key = f"{kind}_force_new"
+    if st.session_state.get(force_new_key, False):
+        # Clear all "(New)" form field keys so the form truly resets
+        for k in list(st.session_state.keys()):
+            if k.startswith(f"{kind}_New_") or k.startswith(f"{kind}_new_") or k.startswith(f"{kind}_pb_"):
+                del st.session_state[k]
+        st.session_state[select_key] = "(New)"
+        st.session_state[force_new_key] = False
+
+
+    options_now = ["(New)"] + filtered
+    if select_key in st.session_state and st.session_state.get(select_key) not in options_now:
+        st.session_state[select_key] = "(New)"
+
+    selected = st.selectbox(
+        f"Select a {'monster' if kind=='monster' else 'NPC'} to view/edit",
+        options=["(New)"] + filtered,
+        key=select_key
+    )
+
+    # Form versioning for reliable auto-clear on NEW saves
+    form_ver_key = f"{kind}_form_ver"
+    if form_ver_key not in st.session_state:
+        st.session_state[form_ver_key] = 0
+    form_ver = int(st.session_state[form_ver_key])
+
+    defaults = None
+    # Key prefix for widgets: include a version when creating NEW so we can force-clear reliably
+    if selected == "(New)":
+        key_prefix = f"{kind}_New_{form_ver}"
+    else:
+        key_prefix = f"{kind}_{selected}"
+
+    overwrite_toggle = False
+    if selected != "(New)":
+        defaults = get_by_name(kind, selected)
+        overwrite_toggle = True
+        st.info("Editing existing entry. Saving will overwrite this entry.")
+
+    prefix = f"{kind}_{key_safe(selected)}"
+    data = creature_form(kind, defaults, key_prefix=key_prefix)
+
+    exists = False
+    if not data.name:
+        st.warning("Name is required.")
+        return
+    exists = (data.name in all_names) and (selected == "(New)")
+    overwrite_choice = st.checkbox("Overwrite if name already exists", value=overwrite_toggle, key=f"{prefix}_overwrite")
+
+    c1, c2, c3 = st.columns(3)
+
+    if c1.button("Save", use_container_width=True, key=f"{prefix}_save"):
+        try:
+            was_new = (selected == "(New)")
+            upsert_creature(kind, data, overwrite=overwrite_choice)
+            st.success("Saved.")
+            if selected == "(New)":
+                st.session_state[form_ver_key] = int(st.session_state[form_ver_key]) + 1
+                st.session_state[force_new_key] = True
+
+            # Auto-clear only when creating a new entry (not when editing existing)
+            if was_new:
+                st.session_state[f"{kind}_force_new"] = True
+
+            st.rerun()
+        except ValueError:
+            st.error("That name already exists. Enable overwrite or rename it.")
+
+    if selected != "(New)":
+        if c2.button("Delete", use_container_width=True, key=f"{prefix}_delete"):
+            delete_by_name(kind, selected)
+            st.success("Deleted.")
+            st.rerun()
+
+    if c3.button("Clear Form", use_container_width=True, key=f"{prefix}_clear"):
+        st.session_state[force_new_key] = True
+        st.rerun()
+    if exists and not overwrite_choice:
+        st.warning("This name already exists. Saving will be blocked unless overwrite is enabled.")
+
+
+
+# =====================================================================================
+# CAMPAIGNS
+# =====================================================================================
+# __SECTION_CAMPAIGNS__
+def page_campaigns():
+    st.header("Campaigns")
+
+    st.caption("Create campaigns to group encounters. Deleting a campaign does not delete encounters — it only unassigns them.")
+    with get_session() as s:
+        st.subheader("Create Campaign")
+        name = st.text_input("Campaign name*", value="", key="camp_new_name")
+        desc = st.text_area("Description", value="", height=90, key="camp_new_desc")
+
+        if st.button("Create Campaign", key="camp_create_btn"):
+            if not name.strip():
+                st.error("Campaign name is required.")
+            else:
+                existing = s.scalar(select(Campaign).where(Campaign.name == name.strip()))
+                if existing:
+                    st.error("That campaign name already exists.")
+                else:
+                    c = Campaign(name=name.strip(), description=desc.strip())
+                    s.add(c)
+                    s.commit()
+                    st.success("Campaign created.")
+                    st.rerun()
+
+        st.divider()
+        st.subheader("Manage Campaigns")
+
+        campaigns = s.scalars(select(Campaign).order_by(Campaign.name)).all()
+        if not campaigns:
+            st.caption("No campaigns yet.")
+            return
+
+        names = [c.name for c in campaigns]
+        selected_name = st.selectbox("Select a campaign", options=names, key="camp_manage_select")
+        camp = s.scalar(select(Campaign).where(Campaign.name == selected_name))
+        if not camp:
+            st.error("Campaign not found.")
+            return
+
+        st.divider()
+        st.subheader("Encounters in this Campaign")
+
+        encs = s.scalars(select(Encounter).where(Encounter.campaign_id == camp.id).order_by(Encounter.updated_at.desc())).all()
+        if not encs:
+            st.caption("No encounters assigned to this campaign yet.")
+        else:
+            for e in encs:
+                st.write(f"- {e.name}")
+
+            st.divider()
+        if not camp:
+            st.error("Campaign not found.")
+            return
+
+        new_name = st.text_input("Rename campaign", value=camp.name, key="camp_rename_input")
+        new_desc = st.text_area("Edit description", value=camp.description or "", height=90, key="camp_desc_input")
+
+        col1, col2 = st.columns([1, 1])
+
+        if col1.button("Save Changes", use_container_width=True, key="camp_save_changes"):
+            nn = new_name.strip()
+            if not nn:
+                st.error("Campaign name cannot be blank.")
+            else:
+                if nn != camp.name:
+                    exists = s.scalar(select(Campaign).where(Campaign.name == nn))
+                    if exists:
+                        st.error("That campaign name already exists.")
+                        return
+                    camp.name = nn
+                camp.description = new_desc.strip()
+                s.commit()
+                st.success("Campaign updated.")
+                st.rerun()
+
+        confirm_key = "camp_delete_confirm"
+        if confirm_key not in st.session_state:
+            st.session_state[confirm_key] = False
+
+        if col2.button("Delete Campaign", use_container_width=True, key="camp_delete_btn"):
+            st.session_state[confirm_key] = True
+
+        if st.session_state[confirm_key]:
+            st.warning("Delete this campaign? Encounters will NOT be deleted â€” they will be unassigned.")
+            d1, d2 = st.columns(2)
+            if d1.button("Yes, delete", use_container_width=True, key="camp_delete_yes"):
+                s.query(Encounter).filter(Encounter.campaign_id == camp.id).update({Encounter.campaign_id: None})
+                s.delete(camp)
+                s.commit()
+                st.session_state[confirm_key] = False
+                st.success("Campaign deleted.")
+                st.rerun()
+            if d2.button("Cancel", use_container_width=True, key="camp_delete_no"):
+                st.session_state[confirm_key] = False
+                st.rerun()
+def _doc_text_from_sections(title: str, sections: list[dict]) -> str:
+    """Return a clean, copy/paste-friendly doc (Markdown-ish)"""
+    out = []
+    out.append(f"# {title}".strip())
+    out.append("")
+    for sec in sections:
+        heading = sec.get("heading", "").strip()
+        if heading:
+            out.append(f"## {heading}")
+        for line in sec.get("lines", []):
+            if not line:
+                continue
+            # preserve intended line breaks
+            out.append(line.strip())
+            out.append("")
+        if sec.get("notes_box", False):
+            out.append("**DM Notes:**")
+            out.append("")
+            out.append("____________________________________________")
+            out.append("____________________________________________")
+            out.append("____________________________________________")
+            out.append("")
+    return "\n".join(out).strip() + "\n"
+
+
+def _pdf_bytes_from_sections(title: str, sections: list[dict]) -> bytes:
+    """Build a clean PDF (white page, black text) from sections."""
+    buf = BytesIO()
+
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=letter,
+        leftMargin=0.75 * inch,
+        rightMargin=0.75 * inch,
+        topMargin=0.75 * inch,
+        bottomMargin=0.75 * inch,
+        title=title,
+    )
+
+    styles = getSampleStyleSheet()
+    H1 = ParagraphStyle("H1", parent=styles["Title"], fontSize=18, leading=22, spaceAfter=12)
+    H2 = ParagraphStyle("H2", parent=styles["Heading2"], fontSize=13, leading=16, spaceBefore=10, spaceAfter=6)
+    BODY = ParagraphStyle("BODY", parent=styles["BodyText"], fontSize=10.5, leading=13)
+
+    story = []
+    story.append(Paragraph(title, H1))
+    story.append(Spacer(1, 6))
+
+    # a subtle rule line
+    story.append(Table([[""]], colWidths=[6.9 * inch], rowHeights=[0.02 * inch],
+                       style=TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.black)])))
+    story.append(Spacer(1, 10))
+
+    def add_notes_box():
+        # Three blank ruled lines in a light box
+        data = [["DM Notes:"]]
+        t = Table(data, colWidths=[6.9 * inch])
+        t.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 10),
+            ("TEXTCOLOR", (0, 0), (-1, -1), colors.black),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.whitesmoke),
+            ("BOX", (0, 0), (-1, -1), 1, colors.black),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        story.append(t)
+
+        # ruled lines
+        for _ in range(4):
+            story.append(Spacer(1, 10))
+            story.append(Table([[""]], colWidths=[6.9 * inch], rowHeights=[0.01 * inch],
+                               style=TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.black)])))
+        story.append(Spacer(1, 12))
+
+    for idx, sec in enumerate(sections):
+        heading = sec.get("heading", "").strip()
+        if heading:
+            story.append(Paragraph(heading, H2))
+
+        for line in sec.get("lines", []):
+            if not line:
+                continue
+            # preserve newlines from your stat block text
+            safe = line.replace("\n", "<br/>")
+            story.append(Paragraph(safe, BODY))
+            story.append(Spacer(1, 6))
+
+        if sec.get("notes_box", False):
+            add_notes_box()
+
+        # light page break rhythm when printing big packets
+        if idx < len(sections) - 1 and (idx % 5 == 4):
+            story.append(PageBreak())
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+def _safe_filename(s: str) -> str:
+    keep = "".join(ch for ch in s if ch.isalnum() or ch in (" ", "_", "-", "."))
+    return keep.strip().replace(" ", "_")[:80] or "document"
+
+
+
+# =====================================================================================
+# ENCOUNTER BUILDER
+# =====================================================================================
+# __SECTION_ENCOUNTER_BUILDER__
+def page_encounters():
+    ensure_session_state()
+
+    st.header("Encounter Builder")
+
+
+    st.caption("Build an encounter from your Monster/NPC libraries. Then export it as a PDF or copy/paste packet (no browser printing).")
+    if st.session_state.last_added:
+        st.info(st.session_state.last_added)
+
+    tabs = st.tabs(["Build Encounter", "Export & Printables", "Encounter Library"])
+    with tabs[0]:
+        st.subheader("Add Monsters")
+        monster_names = get_names("monster")
+        if monster_names:
+            colA, colB, colC = st.columns([2, 1, 1])
+            pick = colA.selectbox("Monster", options=monster_names, key="pick_monster")
+            qty = colB.number_input("Qty", min_value=1, max_value=50, value=1, step=1, key="qty_monster")
+            if colC.button("Add", use_container_width=True):
+                m = get_by_name("monster", pick)
+                if m:
+                    add_entry_from_creature("monster", m, int(qty))
+                    toast(f"Added {pick} x{qty}")
+                    st.rerun()
+        else:
+            st.warning("No monsters in your library yet. Add one in Monsters Library.")
+
+        st.divider()
+        st.subheader("Add NPCs")
+        npc_names = get_names("npc")
+        if npc_names:
+            colA, colB, colC = st.columns([2, 1, 1])
+            pick = colA.selectbox("NPC", options=npc_names, key="pick_npc")
+            qty = colB.number_input("Qty", min_value=1, max_value=50, value=1, step=1, key="qty_npc")
+            if colC.button("Add NPC", use_container_width=True):
+                n = get_by_name("npc", pick)
+                if n:
+                    add_entry_from_creature("npc", n, int(qty))
+                    toast(f"Added {pick} x{qty}")
+                    st.rerun()
+        else:
+            st.warning("No NPCs in your library yet. Add one in NPCs Library.")
+
+        st.divider()
+        st.subheader("Current Encounter Contents")
+        if not st.session_state.builder_entries:
+            st.caption("Nothing added yet.")
+        else:
+            for i, e in enumerate(st.session_state.builder_entries):
+                c1, c2, c3 = st.columns([3, 1, 1])
+                c1.write(f"**{e['name']}** ({e['kind']})")
+                new_qty = c2.number_input("Qty", min_value=1, max_value=50, value=int(e["quantity"]), step=1, key=f"qty_{i}")
+                st.session_state.builder_entries[i]["quantity"] = int(new_qty)
+                if c3.button("Remove", key=f"rm_{i}"):
+                    st.session_state.builder_entries.pop(i)
+                    st.rerun()
+
+            if st.button("Clear Encounter"):
+                st.session_state.builder_entries = []
+                st.session_state.last_added = ""
+                st.rerun()
+
+        st.divider()
+        st.subheader("Save Encounter")
+        enc_name = st.text_input("Encounter name*", value="")
+        enc_desc = st.text_area("Encounter description", value="", height=80)
+        campaigns = ["(None)"] + get_campaign_names()
+        chosen_campaign = st.selectbox("Assign to Campaign (optional)", options=campaigns)
+
+        if st.button("Save Encounter to Library"):
+            if not enc_name.strip():
+                st.error("Encounter name is required.")
+            elif not st.session_state.builder_entries:
+                st.error("Add at least one monster or NPC first.")
+            else:
+                save_encounter(enc_name.strip(), enc_desc.strip(), chosen_campaign)
+                st.success("Encounter saved.")
+                st.rerun()
+
+
+    with tabs[1]:
+        st.subheader("Export")
+
+        st.caption("Download a clean PDF or copy/paste into Google Docs. Export is the supported output path.")
+        st.markdown("### Current Encounter (Builder)")
+        export_title = st.text_input("Export title", value="Encounter Sheet", key="export_title")
+
+        if not st.session_state.builder_entries:
+            st.caption("Build an encounter first on the Build tab.")
+        else:
+            sections = []
+            for e in st.session_state.builder_entries:
+                nm = e.get("name", "")
+                qty = int(e.get("quantity", 1) or 1)
+                has_shield = int(e.get("has_shield", 0) or 0)
+                shield_txt = " [Shield]" if has_shield == 1 else ""
+                heading = f"{nm} x{qty} ({e.get('kind','')}){shield_txt}".strip()
+
+                lines = []
+                top = []
+                if e.get("ac"): top.append(f"AC: {e.get('ac','')}{' (Shield)' if has_shield==1 else ''}")
+                if e.get("hp"): top.append(f"HP: {e.get('hp','')}")
+                if e.get("speed"): top.append(f"Speed: {e.get('speed','')}")
+                if e.get("senses"): top.append(f"Senses: {e.get('senses','')}")
+                if top: lines.append(" | ".join(top))
+
+                scores = {
+                    "STR": int(e.get("str_score", 10) or 10),
+                    "DEX": int(e.get("dex_score", 10) or 10),
+                    "CON": int(e.get("con_score", 10) or 10),
+                    "INT": int(e.get("int_score", 10) or 10),
+                    "WIS": int(e.get("wis_score", 10) or 10),
+                    "CHA": int(e.get("cha_score", 10) or 10),
+                }
+                lines.append("Ability Scores: " + " | ".join([f"{k} {v} ({fmt_mod(v)})" for k, v in scores.items()]))
+
+                saves = {
+                    "STR": str(e.get("save_str","") or "").strip(),
+                    "DEX": str(e.get("save_dex","") or "").strip(),
+                    "CON": str(e.get("save_con","") or "").strip(),
+                    "INT": str(e.get("save_int","") or "").strip(),
+                    "WIS": str(e.get("save_wis","") or "").strip(),
+                    "CHA": str(e.get("save_cha","") or "").strip(),
+                }
+                save_bits = [f"{k} {v}".strip() for k, v in saves.items() if v]
+                lines.append("Saving Throws: " + (" | ".join(save_bits) if save_bits else "—"))
+
+                traits = str(e.get("traits","") or "").strip()
+                actions = str(e.get("actions","") or "").strip()
+                bonus = str(e.get("bonus_actions","") or "").strip()
+                react = str(e.get("reactions","") or "").strip()
+                leg = str(e.get("legendary_actions","") or "").strip()
+
+                if traits: lines.append("Traits:\n" + traits)
+                if actions: lines.append("Actions:\n" + actions)
+                if bonus: lines.append("Bonus Actions:\n" + bonus)
+                if react: lines.append("Reactions:\n" + react)
+                if leg: lines.append("Legendary Actions:\n" + leg)
+
+                sections.append({"heading": heading, "lines": lines, "notes_box": True})
+
+            doc_text = _doc_text_from_sections(export_title, sections)
+            pdf_bytes = _pdf_bytes_from_sections(export_title, sections)
+
+            cA, cB = st.columns(2)
+            with cA:
+                # Phase 2.3 (UI): Encounter Export header
+                st.markdown("### Encounter Export")
+                st.caption("Download a clean PDF or copy/paste into Google Docs. Export is the supported output path.")
+                st.markdown('')
+                st.download_button(
+                    "Download PDF",
+                    data=pdf_bytes,
+                    file_name=f"{export_title.strip().replace(' ','_') or 'Encounter'}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            with cB:
+                st.text_area("Copy/Paste (Google Doc friendly)", value=doc_text, height=320)
+
+        st.divider()
+
+        # Phase 2.3 (UI): Campaign Packet header
+        st.divider()
+        st.markdown("### Campaign Packet Export")
+        st.caption("A combined copy/paste packet for your campaign. Useful for Google Docs and sharing.")
+        st.markdown('')
+        st.markdown("### Campaign Packet")
+        campaign_names = get_campaign_names()
+        if not campaign_names:
+            st.caption("No campaigns found yet.")
+        else:
+            chosen = st.selectbox("Select campaign", options=campaign_names, key="export_campaign_pick")
+            with get_session() as s:
+                camp = s.scalar(select(Campaign).where(Campaign.name == chosen))
+                if not camp:
+                    st.error("Campaign not found.")
+                else:
+                    encs = s.scalars(
+                        select(Encounter).where(Encounter.campaign_id == camp.id).order_by(Encounter.updated_at.desc())
+                    ).all()
+
+                    if not encs:
+                        st.caption("No encounters assigned to this campaign yet.")
+                    else:
+                        sections = []
+                        for enc in encs:
+                            hdr_lines = []
+                            if enc.description:
+                                hdr_lines.append(enc.description)
+                            sections.append({"heading": enc.name, "lines": hdr_lines, "notes_box": False})
+
+                            for entry in enc.entries:
+                                has_shield = int(getattr(entry, "has_shield", 0) or 0)
+                                shield_txt = " [Shield]" if has_shield == 1 else ""
+                                heading = f"{entry.name} x{entry.quantity}{shield_txt}"
+
+                                lines = []
+                                top = []
+                                if entry.ac: top.append(f"AC: {entry.ac}{' (Shield)' if has_shield==1 else ''}")
+                                if entry.hp: top.append(f"HP: {entry.hp}")
+                                if entry.speed: top.append(f"Speed: {entry.speed}")
+                                if entry.senses: top.append(f"Senses: {entry.senses}")
+                                if top: lines.append(" | ".join(top))
+
+                                scores = {
+                                    "STR": int(getattr(entry, "str_score", 10) or 10),
+                                    "DEX": int(getattr(entry, "dex_score", 10) or 10),
+                                    "CON": int(getattr(entry, "con_score", 10) or 10),
+                                    "INT": int(getattr(entry, "int_score", 10) or 10),
+                                    "WIS": int(getattr(entry, "wis_score", 10) or 10),
+                                    "CHA": int(getattr(entry, "cha_score", 10) or 10),
+                                }
+                                lines.append("Ability Scores: " + " | ".join([f"{k} {v} ({fmt_mod(v)})" for k, v in scores.items()]))
+
+                                saves = {
+                                    "STR": str(getattr(entry, "save_str","") or "").strip(),
+                                    "DEX": str(getattr(entry, "save_dex","") or "").strip(),
+                                    "CON": str(getattr(entry, "save_con","") or "").strip(),
+                                    "INT": str(getattr(entry, "save_int","") or "").strip(),
+                                    "WIS": str(getattr(entry, "save_wis","") or "").strip(),
+                                    "CHA": str(getattr(entry, "save_cha","") or "").strip(),
+                                }
+                                save_bits = [f"{k} {v}".strip() for k, v in saves.items() if v]
+                                lines.append("Saving Throws: " + (" | ".join(save_bits) if save_bits else "—"))
+
+                                traits = str(getattr(entry, "traits","") or "").strip()
+                                actions = str(getattr(entry, "actions","") or "").strip()
+                                bonus = str(getattr(entry, "bonus_actions","") or "").strip()
+                                react = str(getattr(entry, "reactions","") or "").strip()
+                                leg = str(getattr(entry, "legendary_actions","") or "").strip()
+
+                                if traits: lines.append("Traits:\n" + traits)
+                                if actions: lines.append("Actions:\n" + actions)
+                                if bonus: lines.append("Bonus Actions:\n" + bonus)
+                                if react: lines.append("Reactions:\n" + react)
+                                if leg: lines.append("Legendary Actions:\n" + leg)
+
+                                sections.append({"heading": heading, "lines": lines, "notes_box": True})
+
+                        packet_title = camp.name
+                        doc_text = _doc_text_from_sections(packet_title, sections)
+                        pdf_bytes = _pdf_bytes_from_sections(packet_title, sections)
+
+                        cA, cB = st.columns(2)
+                        with cA:
+                            st.download_button(
+                                "Download Campaign Packet PDF",
+                                data=pdf_bytes,
+                                file_name=f"{packet_title.strip().replace(' ','_') or 'Campaign'}_Packet.pdf",
+                                mime="application/pdf",
+                                use_container_width=True,
+                            )
+                        with cB:
+                            st.text_area("Copy/Paste Campaign Packet (Google Docs)", value=doc_text, height=320)
+
+    with tabs[2]:
+        st.subheader("Encounter Library")
+        with get_session() as s:
+            encounters = s.scalars(select(Encounter).order_by(Encounter.updated_at.desc())).all()
+            if not encounters:
+                st.caption("No saved encounters yet.")
+            else:
+                names = [f"{e.name} (#{e.id})" for e in encounters]
+                pick = st.selectbox("Select an encounter", options=names, key="enc_manage_pick")
+                chosen_id = int(pick.split("#")[-1].strip(")"))
+                enc = s.get(Encounter, chosen_id)
+                if not enc:
+                    st.error("Encounter not found.")
+                    return
+
+                colA, colB = st.columns([2, 1])
+                with colB:
+                    if st.button("Load into Builder (replaces current)", use_container_width=True, key="enc_load_btn"):
+                        st.session_state.builder_entries = []
+                        for entry in enc.entries:
+                            st.session_state.builder_entries.append(
+                                dict(
+                                    kind=entry.kind,
+                                    name=entry.name,
+                                    quantity=entry.quantity,
+                                    ac=entry.ac,
+                                    has_shield=int(getattr(entry, "has_shield", 0)),
+                                    hp=entry.hp,
+                                    speed=entry.speed,
+                                    senses=entry.senses,
+                                    str_score=entry.str_score,
+                                    dex_score=entry.dex_score,
+                                    con_score=entry.con_score,
+                                    int_score=entry.int_score,
+                                    wis_score=entry.wis_score,
+                                    cha_score=entry.cha_score,
+                                    save_str=entry.save_str,
+                                    save_dex=entry.save_dex,
+                                    save_con=entry.save_con,
+                                    save_int=entry.save_int,
+                                    save_wis=entry.save_wis,
+                                    save_cha=entry.save_cha,
+                                    traits=entry.traits,
+                                    actions=entry.actions,
+                                    bonus_actions=entry.bonus_actions,
+                                    reactions=entry.reactions,
+                                    legendary_actions=entry.legendary_actions,
+                                    notes=entry.notes,
+                                )
+                            )
+                        st.session_state.last_added = "Loaded saved encounter."
+                        st.success("Loaded.")
+                        st.rerun()
+
+                with colA:
+                    st.markdown(f"**Name:** {enc.name}")
+                    if enc.description:
+                        st.caption(enc.description)
+
+                # Reassign encounter to a campaign
+                campaign_options = ["(None)"] + get_campaign_names()
+                current_campaign = "(None)"
+                if enc.campaign_id:
+                    c = s.get(Campaign, enc.campaign_id)
+                    if c:
+                        current_campaign = c.name
+
+                new_campaign = st.selectbox(
+                    "Assign / Reassign to Campaign",
+                    options=campaign_options,
+                    index=campaign_options.index(current_campaign) if current_campaign in campaign_options else 0,
+                    key=f"enc_campaign_pick_{enc.id}",
+                )
+
+                if st.button("Save Campaign Assignment", key=f"enc_campaign_save_{enc.id}"):
+                    if new_campaign == "(None)":
+                        enc.campaign_id = None
+                    else:
+                        c = s.scalar(select(Campaign).where(Campaign.name == new_campaign))
+                        enc.campaign_id = c.id if c else None
+                    enc.touch()
+                    s.commit()
+                    st.success("Assignment updated.")
+                    st.rerun()
+
+                st.divider()
+
+                confirm_key = "enc_delete_confirm"
+                if confirm_key not in st.session_state:
+                    st.session_state[confirm_key] = False
+
+                if st.button("Delete Encounter", key="enc_delete_btn"):
+                    st.session_state[confirm_key] = True
+
+                if st.session_state[confirm_key]:
+                    st.warning("Delete this encounter? This cannot be undone.")
+                    x, y = st.columns(2)
+                    if x.button("Yes, delete", key="enc_delete_yes"):
+                        delete_encounter(chosen_id)
+                        st.session_state[confirm_key] = False
+                        st.success("Encounter deleted.")
+                        st.rerun()
+                    if y.button("Cancel", key="enc_delete_no"):
+                        st.session_state[confirm_key] = False
+                        st.rerun()
+
+
+
+# =====================================================================================
+# APP ENTRYPOINT
+# =====================================================================================
+# __SECTION_MAIN__
+def main():
+    st.set_page_config(page_title=APP_TITLE, layout="wide")
+    ensure_data_dir()
+    init_db()
+    load_css()
+
+    st.title(APP_TITLE)
+
+    st.sidebar.title("Navigation")
+    page = st.sidebar.radio("Go to", ["Encounter Builder", "Monsters Library", "NPCs Library", "Campaigns"])
+
+    if page == "Monsters Library":
+        page_creature_library("monster")
+    elif page == "NPCs Library":
+        page_creature_library("npc")
+    elif page == "Campaigns":
+        page_campaigns()
+    else:
+        page_encounters()
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+
+
+
+
+
+
+
+

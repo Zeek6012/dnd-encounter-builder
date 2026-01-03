@@ -1,0 +1,54 @@
+﻿/* Restore native number input spinners (Chrome/Edge/Safari) */
+input[type="number"] {
+  -webkit-appearance: auto !important;
+  appearance: auto !important;
+}
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: auto !important;
+  appearance: auto !important;
+  opacity: 1 !important;
+  margin: 0;
+}
+
+/* Firefox */
+input[type="number"] {
+  -moz-appearance: number-input !important;
+}
+
+/* Hide Streamlit +/- buttons on number inputs; keep native in-box spinners */ 
+.stNumberInput button { 
+  display: none !important; 
+}
+
+
+/* ===== PRINT-ONLY LAYOUT: print just the encounter/campaign sheet ===== */
+@media print {
+  /* Hide Streamlit chrome */
+  header, footer, [data-testid="stSidebar"], [data-testid="stToolbar"], [data-testid="stStatusWidget"] { display: none !important; }
+  /* Hide all buttons/inputs in print */
+  button, input, textarea, select { display: none !important; }
+
+  /* Hide everything by default */
+  body * { visibility: hidden !important; }
+
+  /* Show ONLY print-area */
+  #print-area, #print-area * {
+    visibility: visible !important;
+  }
+
+  /* Place print-area at top-left */
+  #print-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    padding: 0.25in;
+  }
+}
+
+/* Make the print sheet look clean on screen too */
+#print-area h1 { margin: 0 0 0.25rem 0; }
+#print-area h2 { margin: 0.75rem 0 0.25rem 0; }
+#print-area h3 { margin: 0.5rem 0 0.25rem 0; }

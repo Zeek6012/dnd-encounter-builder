@@ -1,0 +1,23 @@
+﻿/* Restore native number input spinners (Chrome/Edge/Safari) */
+input[type="number"] {
+  -webkit-appearance: auto !important;
+  appearance: auto !important;
+}
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: auto !important;
+  appearance: auto !important;
+  opacity: 1 !important;
+  margin: 0;
+}
+
+/* Firefox */
+input[type="number"] {
+  -moz-appearance: number-input !important;
+}
+
+/* Hide Streamlit +/- buttons on number inputs; keep native in-box spinners */ 
+.stNumberInput button { 
+  display: none !important; 
+}
