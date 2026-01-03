@@ -1543,8 +1543,14 @@ def page_encounters():
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     ensure_data_dir()
-    init_db()
+
+    # Only run DB init once per session (prevents slow reruns on Streamlit Cloud)
+    if "db_initialized" not in st.session_state:
+        init_db()
+        st.session_state["db_initialized"] = True
+
     load_css()
+
 
     st.title(APP_TITLE)
 
