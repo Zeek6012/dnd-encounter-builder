@@ -65,6 +65,7 @@ from reportlab.lib import colors
 
 
 import streamlit as st
+from app.modules.registry import toolkit_enabled, init_all_module_tables
 from bulk_import import page_bulk_import
 
 import streamlit.components.v1 as components
@@ -1542,6 +1543,9 @@ def page_encounters():
 # __SECTION_MAIN__
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
+
+# --- Toolkit modules (safe no-op if none registered)
+init_all_module_tables()
     ensure_data_dir()
 
     # Only run DB init once per session (prevents slow reruns on Streamlit Cloud)
@@ -1553,10 +1557,19 @@ def main():
 
 
     st.title(APP_TITLE)
-
     st.sidebar.title("Navigation")
-    page = st.sidebar.radio("Go to", ["Encounter Builder", "Monsters Library", "NPCs Library", "Campaigns", "Bulk Import"])
-
+    base_pages = [
+    "Encounter Builder",
+    "Monsters Library",
+    "NPCs Library",
+    "Campaigns",
+    "Bulk Import",
+    ]
+    pages = list(base_pages)
+    # --- Toolkit (safe, gated) ---
+    if toolkit_enabled():
+    pages.append("Toolkit")
+    page = st.sidebar.radio("Go to", pages)
     if page == "Monsters Library":
         page_creature_library("monster")
     elif page == "NPCs Library":
@@ -1566,6 +1579,13 @@ def main():
 
     elif page == "Bulk Import":
         page_bulk_import()
+
+elif page == "Toolkit":
+    st.header("DM Toolkit")
+    if not toolkit_enabled():
+        st.info("Toolkit is currently disabled. Enable it via Streamlit Secrets: enable_toolkit=true")
+    else:
+        st.success("Toolkit enabled. Name Generator module will be added next.")
     else:
         page_encounters()
 
