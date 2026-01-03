@@ -4,3 +4,10 @@ __pycache__/
 tools/
 *.BACKUP_*
 data/encounter_builder.sqlite3
+# --- Local / generated files ---
+app/_backups/
+__pycache__/
+*.pyc
+tools/
+*.BACKUP_*
+data/encounter_builder.sqlite3
