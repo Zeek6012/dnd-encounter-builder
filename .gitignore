@@ -1,0 +1,6 @@
+# --- Local / generated files ---
+__pycache__/
+*.pyc
+tools/
+*.BACKUP_*
+data/encounter_builder.sqlite3
