@@ -17,7 +17,32 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 DB_PATH = r"data\encounter_builder.sqlite3"
-ENGINE = create_engine(f"sqlite:///{DB_PATH}", echo=False, future=True)
+
+def _get_database_url() -> str:
+    """
+    Priority:
+      1) Streamlit secrets: st.secrets["database"]["url"]
+      2) Env var: DATABASE_URL / SQLALCHEMY_DATABASE_URL
+      3) Local SQLite file
+    """
+    # Streamlit secrets (used on Streamlit Community Cloud)
+    try:
+        import streamlit as st  # type: ignore
+        if "database" in st.secrets and "url" in st.secrets["database"]:
+            return str(st.secrets["database"]["url"])
+    except Exception:
+        pass
+
+    # Environment variable fallback (useful for other hosts)
+    env_url = os.getenv("DATABASE_URL") or os.getenv("SQLALCHEMY_DATABASE_URL")
+    if env_url:
+        return env_url
+
+    # Local dev fallback
+    return f"sqlite:///{DB_PATH}"
+
+DATABASE_URL = _get_database_url()
+ENGINE = create_engine(DATABASE_URL, echo=False, future=True)
 SessionLocal = sessionmaker(bind=ENGINE, autoflush=False, autocommit=False, future=True)
 
 
@@ -221,9 +246,15 @@ def get_session():
 
 
 def init_db() -> None:
-    os.makedirs("data", exist_ok=True)
+    # SQLite: ensure data folder + run lightweight migrations
+    if ENGINE.url.get_backend_name() == "sqlite":
+        os.makedirs("data", exist_ok=True)
+        Base.metadata.create_all(ENGINE)
+        migrate_db()
+        return
+
+    # Postgres (Supabase): just create tables (no sqlite PRAGMA migrations)
     Base.metadata.create_all(ENGINE)
-    migrate_db()
 
 
 def _existing_tables(conn: sqlite3.Connection) -> set[str]:
@@ -241,6 +272,10 @@ def _add_col(conn: sqlite3.Connection, table: str, col: str, decl: str):
 
 
 def migrate_db() -> None:
+    # This migration logic is SQLite-specific (PRAGMA/ALTER). Skip on Postgres.
+    if ENGINE.url.get_backend_name() != "sqlite":
+        return
+
     conn = sqlite3.connect(DB_PATH)
     try:
         tables = _existing_tables(conn)
