@@ -221,15 +221,15 @@ def page_bulk_import():
 
     dry_run = st.checkbox("Dry run (preview only, no database changes)", value=True, key=f"dryrun_{kind}")
 
-    existing = _existing_names(kind)
+    # IMPORTANT: Choose the target table first, then check duplicates only within that table.
+    Model = _model_for(kind)
+    existing = _existing_names(Model)
     taken = set(existing)
 
     to_insert = []
     to_update = []
     skipped_dupes = []
     renamed = []
-
-    Model = _model_for(kind)
 
     # Plan actions
     for r in cleaned:
