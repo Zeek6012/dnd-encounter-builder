@@ -64,6 +64,13 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib import colors
 
 
+# --- Import path bootstrap (required for Streamlit Cloud when running app/main.py) ---
+import sys
+from pathlib import Path as _Path
+_REPO_ROOT = _Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import streamlit as st
 from app.modules.registry import toolkit_enabled, init_all_module_tables
 from bulk_import import page_bulk_import
