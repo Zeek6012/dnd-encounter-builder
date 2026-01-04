@@ -354,17 +354,17 @@ def render() -> None:
                     for style_cat, first, last in STARTER_DATA:
                         anc = _suggest_ancestry(style_cat, first, last)
                         gen, neutral = _suggest_gender(first)
-                        s.execute(
-                            text("""INSERT INTO toolkit_names
+                        s.execute(text(\"\"\"INSERT INTO toolkit_names
                             (first_name, last_name, style_category, ancestry_tag, gender_tag, is_neutral, needs_review)
-                            VALUES (:first, :last, :style, :anc, :gen, :neutral, 1)"""),
+                            VALUES (:first, :last, :style, :anc, :gen, :neutral, :needs_review)"""),
                             {
                                 "first": first.strip(),
                                 "last": last.strip(),
                                 "style": style_cat,
                                 "anc": anc,
                                 "gen": gen,
-                                "neutral": 1 if neutral else 0,
+                                "neutral": bool(neutral),
+                                "needs_review": True,
                             },
                         )
                         inserted += 1
@@ -388,7 +388,7 @@ def render() -> None:
                             text("""
                                 INSERT INTO toolkit_names
                                 (first_name, last_name, style_category, ancestry_tag, gender_tag, is_neutral, needs_review)
-                                VALUES (:first, :last, :style, :anc, :gen, :neutral, 1)
+                                VALUES (:first, :last, :style, :anc, :gen, :neutral, :needs_review)
                             """),
                             {
                                 "first": first.strip(),
@@ -396,7 +396,8 @@ def render() -> None:
                                 "style": style_cat,
                                 "anc": anc,
                                 "gen": gen,
-                                "neutral": 1 if neutral else 0,
+                                "neutral": bool(neutral),
+                                "needs_review": True,
                             },
                         )
                         inserted += 1
@@ -413,11 +414,10 @@ def render() -> None:
                     text("""
                         SELECT id, first_name, last_name, style_category, ancestry_tag, gender_tag, is_neutral
                         FROM toolkit_names
-                        WHERE needs_review = 1
+                        WHERE needs_review = :needs_review_flag
                         ORDER BY id DESC
                         LIMIT 25
-                    """)
-                ).fetchall()
+                    \"\"\"), {\"needs_review_flag\": True}).fetchall()
             except Exception as e:
                 rows = []
                 st.error(f"Query failed: {e}")
