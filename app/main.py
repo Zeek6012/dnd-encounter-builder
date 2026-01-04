@@ -1544,8 +1544,8 @@ def page_encounters():
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
 
-# --- Toolkit modules (safe no-op if none registered)
-init_all_module_tables()
+    # --- Toolkit modules (safe no-op if none registered)
+    init_all_module_tables()
     ensure_data_dir()
 
     # Only run DB init once per session (prevents slow reruns on Streamlit Cloud)
@@ -1558,18 +1558,23 @@ init_all_module_tables()
 
     st.title(APP_TITLE)
     st.sidebar.title("Navigation")
+
     base_pages = [
-    "Encounter Builder",
-    "Monsters Library",
-    "NPCs Library",
-    "Campaigns",
-    "Bulk Import",
+        "Encounter Builder",
+        "Monsters Library",
+        "NPCs Library",
+        "Campaigns",
+        "Bulk Import",
     ]
+
     pages = list(base_pages)
+
     # --- Toolkit (safe, gated) ---
     if toolkit_enabled():
-    pages.append("Toolkit")
+        pages.append("Toolkit")
+
     page = st.sidebar.radio("Go to", pages)
+
     if page == "Monsters Library":
         page_creature_library("monster")
     elif page == "NPCs Library":
@@ -1580,18 +1585,27 @@ init_all_module_tables()
     elif page == "Bulk Import":
         page_bulk_import()
 
-elif page == "Toolkit":
-    st.header("DM Toolkit")
-    if not toolkit_enabled():
-        st.info("Toolkit is currently disabled. Enable it via Streamlit Secrets: enable_toolkit=true")
-    else:
-        st.success("Toolkit enabled. Name Generator module will be added next.")
-    else:
-        page_encounters()
+    elif page == "Toolkit":
+        st.header("DM Toolkit")
+
+        if not toolkit_enabled():
+            st.info("Toolkit is currently disabled. For local testing, set ENABLE_TOOLKIT=true in your environment. For Streamlit Cloud, set enable_toolkit=true in Secrets.")
+        else:
+            from app.modules.registry import get_modules
+
+            mods = [m for m in get_modules() if m.section == "Toolkit"]
+            if not mods:
+                st.warning("No Toolkit modules registered yet.")
+            else:
+                names = [m.name for m in mods]
+                pick = st.selectbox("Choose a module", options=names, key="toolkit_module_pick")
+                selected = next(m for m in mods if m.name == pick)
+                selected.render()
 
 
 if __name__ == "__main__":
     main()
+
 
 
 

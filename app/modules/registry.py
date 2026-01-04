@@ -9,6 +9,8 @@ Design goals:
 
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
@@ -27,9 +29,17 @@ class Module:
 def toolkit_enabled() -> bool:
     """
     Safety switch. Default OFF unless explicitly enabled.
-    - Streamlit Cloud: put enable_toolkit=true in Secrets.
-    - Local: set env var ENABLE_TOOLKIT=true (optional).
+
+    Enable options:
+    - Local: set env var ENABLE_TOOLKIT=true
+    - Streamlit Cloud / local secrets: set enable_toolkit=true
     """
+    # Local env var (fast for testing)
+    env_val = os.getenv("ENABLE_TOOLKIT", "").strip().lower()
+    if env_val in ("1", "true", "yes", "on"):
+        return True
+
+    # Secrets (Cloud or local .streamlit/secrets.toml)
     try:
         val = st.secrets.get("enable_toolkit", False)
         return bool(val)
@@ -40,9 +50,19 @@ def toolkit_enabled() -> bool:
 def get_modules() -> List[Module]:
     """
     Return registered modules.
-    For now, this list will be empty until we add Name Generator.
     """
-    return []
+    # Import inside function to avoid import-time side effects
+    from app.modules import name_generator
+
+    return [
+        Module(
+            id=name_generator.MODULE_ID,
+            name=name_generator.MODULE_NAME,
+            section=name_generator.MODULE_SECTION,
+            render=name_generator.render,
+            init_db=name_generator.init_db,
+        ),
+    ]
 
 
 def init_all_module_tables() -> None:
