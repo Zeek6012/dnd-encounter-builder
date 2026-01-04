@@ -1577,12 +1577,8 @@ def main():
         "Bulk Import",
     ]
 
-    pages = list(base_pages)
-
-    # --- Toolkit (safe, gated) ---
-    if toolkit_enabled():
-        pages.append("Toolkit")
-
+    pages = list(base_pages)    # --- Toolkit (always visible; contents still gated) ---
+    pages.append("Toolkit")
     page = st.sidebar.radio("Go to", pages)
 
     if page == "Encounter Builder":
