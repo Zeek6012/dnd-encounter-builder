@@ -127,32 +127,51 @@ STARTER_DATA = [('Common Names', 'Adrik', 'Brightsun'),
 
 def init_db() -> None:
     """
-    Create toolkit_names table (works on SQLite + Postgres).
+    Create toolkit_names table (SQLite local + Postgres on Streamlit Cloud).
     """
-    ddl = """
-    CREATE TABLE IF NOT EXISTS toolkit_names (
-        id            INTEGER PRIMARY KEY AUTOINCREMENT,
-        first_name    TEXT NOT NULL,
-        last_name     TEXT NOT NULL,
-        style_category TEXT NOT NULL,
-
-        ancestry_tag  TEXT NOT NULL DEFAULT 'Unknown',
-        gender_tag    TEXT NOT NULL DEFAULT 'Unknown',
-        is_neutral    BOOLEAN NOT NULL DEFAULT 0,
-
-        needs_review  BOOLEAN NOT NULL DEFAULT 1,
-        source        TEXT,
-        notes         TEXT
-    );
-    """
-    # Postgres doesn't support AUTOINCREMENT; but SQLite will ignore SERIAL, so we keep it SQLite-friendly.
-    # On Postgres, SQLAlchemy typically uses SERIAL/IDENTITY via models, but we're keeping a simple DDL.
-    # If running on Postgres, the existing DB layer already handles tables; we'll patch this later if needed.
-    # For now, we create the table only if it doesn't exist; if Postgres complains, we handle in UI.
     try:
         with get_session() as s:
+            dialect = s.get_bind().dialect.name
+
+            if dialect == "postgresql":
+                ddl = """
+                CREATE TABLE IF NOT EXISTS toolkit_names (
+                    id BIGSERIAL PRIMARY KEY,
+                    first_name TEXT NOT NULL,
+                    last_name TEXT NOT NULL,
+                    style_category TEXT NOT NULL,
+
+                    ancestry_tag TEXT NOT NULL DEFAULT 'Unknown',
+                    gender_tag   TEXT NOT NULL DEFAULT 'Unknown',
+                    is_neutral   BOOLEAN NOT NULL DEFAULT FALSE,
+
+                    needs_review BOOLEAN NOT NULL DEFAULT TRUE,
+                    source       TEXT,
+                    notes        TEXT
+                );
+                """
+            else:
+                # SQLite
+                ddl = """
+                CREATE TABLE IF NOT EXISTS toolkit_names (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    first_name TEXT NOT NULL,
+                    last_name TEXT NOT NULL,
+                    style_category TEXT NOT NULL,
+
+                    ancestry_tag TEXT NOT NULL DEFAULT 'Unknown',
+                    gender_tag   TEXT NOT NULL DEFAULT 'Unknown',
+                    is_neutral   INTEGER NOT NULL DEFAULT 0,
+
+                    needs_review INTEGER NOT NULL DEFAULT 1,
+                    source       TEXT,
+                    notes        TEXT
+                );
+                """
+
             s.execute(text(ddl))
             s.commit()
+
     except Exception as e:
         # Don't crash the app; surface the error in the UI.
         st.error(f"Name Generator DB init failed: {e}")
