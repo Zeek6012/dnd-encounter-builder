@@ -501,6 +501,9 @@ def creature_form(kind: CreatureKind, defaults=None, key_prefix: str = "form") -
         except Exception:
             pb_default = 0
 
+        # Safety clamp (prevents StreamlitValueBelowMinError if bad data contains negative PB)
+        pb_default = max(0, int(pb_default))
+
         pb_int = st.number_input(
             "PB (0 = blank)",
             min_value=0,
@@ -1582,7 +1585,9 @@ def main():
 
     page = st.sidebar.radio("Go to", pages)
 
-    if page == "Monsters Library":
+    if page == "Encounter Builder":
+        page_encounters()
+    elif page == "Monsters Library":
         page_creature_library("monster")
     elif page == "NPCs Library":
         page_creature_library("npc")
