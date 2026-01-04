@@ -354,7 +354,7 @@ def render() -> None:
                     for style_cat, first, last in STARTER_DATA:
                         anc = _suggest_ancestry(style_cat, first, last)
                         gen, neutral = _suggest_gender(first)
-                        s.execute(text(\"\"\"INSERT INTO toolkit_names
+                        s.execute(text("""INSERT INTO toolkit_names
                             (first_name, last_name, style_category, ancestry_tag, gender_tag, is_neutral, needs_review)
                             VALUES (:first, :last, :style, :anc, :gen, :neutral, :needs_review)"""),
                             {
@@ -410,14 +410,13 @@ def render() -> None:
         st.write("This is where you’ll approve/adjust ancestry + gender tags. (We’ll build the UI next.)")
         with get_session() as s:
             try:
-                rows = s.execute(
-                    text("""
-                        SELECT id, first_name, last_name, style_category, ancestry_tag, gender_tag, is_neutral
-                        FROM toolkit_names
-                        WHERE needs_review = :needs_review_flag
-                        ORDER BY id DESC
-                        LIMIT 25
-                    \"\"\"), {\"needs_review_flag\": True}).fetchall()
+                                rows = s.execute(
+                    text("SELECT id, first_name, last_name, style_category, ancestry_tag, gender_tag, is_neutral "
+                         "FROM toolkit_names "
+                         "WHERE needs_review = :needs_review_flag "
+                         "ORDER BY id DESC LIMIT 25"),
+                    {"needs_review_flag": True},
+                ).fetchall()
             except Exception as e:
                 rows = []
                 st.error(f"Query failed: {e}")
